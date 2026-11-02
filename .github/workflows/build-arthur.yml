@@ -54,11 +54,24 @@ jobs:
           CONFIG_PACKAGE_kmod-fs-ext4=y
           CONFIG_PACKAGE_e2fsprogs=y
 
-          # dae 所需的网络组件
+          # ==============================================================================
+          # dae v2.x 核心网络虚拟化与驱动依赖 (必须)
+          # ==============================================================================
+          # 1. 解决当前报错的关键：虚拟网卡对与网络命名空间 (veth & netkit)
+          CONFIG_PACKAGE_kmod-veth=y
+          CONFIG_KERNEL_NET_NS=y
+          CONFIG_PACKAGE_kmod-netkit=y
+          # 2. eBPF TC 与 XSK 数据面加速
+          CONFIG_PACKAGE_kmod-sched-bpf=y
+          CONFIG_PACKAGE_kmod-xdp-sockets-diag=y
           CONFIG_PACKAGE_kmod-tun=y
-          CONFIG_PACKAGE_ip-full=y
-
-          # ZeroTier 支持
+          CONFIG_PACKAGE_kmod-nft-tproxy=y
+          # 3. 内核 BTF 与 eBPF JIT 支持
+          CONFIG_KERNEL_DEBUG_INFO_BTF=y
+          CONFIG_KERNEL_BPF_EVENTS=y
+          CONFIG_KERNEL_CGROUP_BPF=y
+          CONFIG_KERNEL_XDP_SOCKETS=y
+          # 4. ZeroTier 及其依赖
           CONFIG_PACKAGE_zerotier=y
           CONFIG_PACKAGE_luci-app-zerotier=y
           EOF
