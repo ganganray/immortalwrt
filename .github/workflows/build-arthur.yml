@@ -37,12 +37,23 @@ jobs:
         run: |
           ./scripts/feeds update -a
           ./scripts/feeds install -a
-          # 引入独立 vmlinux-btf 扩展包（解耦内核二进制与 BTF 数据，解决 6MB 内核物理分区溢出）
+          # 1. 引入独立 vmlinux-btf 扩展包（将 BTF 放入 55.6GB 根分区，不占 6MB 内核槽位）
           git clone --depth 1 https://github.com/QiuSimons/vmlinux-btf.git package/vmlinux-btf
+          # 2. 修复上游 kmod-sched-bpf 对 act_bpf.ko 的打包 Bug，确保 dae 必需的 cls_bpf.ko 正常打包
+          sed -i 's|$(LINUX_DIR)/net/sched/act_bpf.ko||g' package/kernel/linux/modules/netsupport.mk
+          sed -i 's|act_bpf||g' package/kernel/linux/modules/netsupport.mk
 
       - name: Generate Config
         run: |
-          # 1. 写入目标机型与功能配置
+          # 1. 将内核编译器优化从 -O2 切换为 -Os (OPTIMIZE_FOR_SIZE)，为 uImage.itb 缩减约 700KB 体积
+          for cfg in target/linux/generic/config-* target/linux/qualcommax/config-* target/linux/qualcommax/ipq60xx/config-*; do
+            if [ -f "$cfg" ]; then
+              sed -i 's/CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE=y/# CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE is not set/g' "$cfg"
+              echo "CONFIG_CC_OPTIMIZE_FOR_SIZE=y" >> "$cfg"
+            fi
+          done
+
+          # 2. 写入目标机型与功能配置
           cat << 'EOF' > .config
           CONFIG_TARGET_qualcommax=y
           CONFIG_TARGET_qualcommax_ipq60xx=y
@@ -57,38 +68,42 @@ jobs:
           CONFIG_PACKAGE_e2fsprogs=y
 
           # ==============================================================================
-          # dae v2.x 核心网络虚拟化与驱动依赖
+          # 内核体积瘦身选项（立省约 330KB，彻底告别 6MB 分区溢出）
           # ==============================================================================
-          # 1. 虚拟网卡对与命名空间 (veth)
-          CONFIG_PACKAGE_kmod-veth=y
+          CONFIG_KERNEL_KALLSYMS=n
+          CONFIG_KERNEL_KPROBES=n
+          CONFIG_KERNEL_BPF_EVENTS=n
+          CONFIG_KERNEL_PERF_EVENTS=n
+
+          # ==============================================================================
+          # dae v2.x 核心依赖（内核级仅保留最精简的 eBPF 与 Cgroup 钩子，其余全部模块化）
+          # ==============================================================================
+          CONFIG_KERNEL_BPF_SYSCALL=y
+          CONFIG_KERNEL_BPF_JIT=y
+          CONFIG_KERNEL_CGROUP_BPF=y
           CONFIG_KERNEL_NET_NS=y
 
-          # 2. 必备网络与传输层驱动
-          CONFIG_PACKAGE_kmod-xdp-sockets-diag=y
+          # 模块化驱动（存放在 55.6GB 根分区中，占内核分区 0 字节）
+          CONFIG_PACKAGE_vmlinux-btf=y
+          CONFIG_PACKAGE_kmod-veth=y
+          CONFIG_PACKAGE_kmod-sched-core=y
+          CONFIG_PACKAGE_kmod-sched-bpf=y
           CONFIG_PACKAGE_kmod-tun=y
           CONFIG_PACKAGE_kmod-nft-tproxy=y
 
-          # 3. 内核 eBPF / JIT / XDP 运行支持（轻量级，不膨胀内核体积）
-          CONFIG_KERNEL_BPF_SYSCALL=y
-          CONFIG_KERNEL_BPF_JIT=y
-          CONFIG_KERNEL_BPF_EVENTS=y
-          CONFIG_KERNEL_CGROUP_BPF=y
-          CONFIG_KERNEL_XDP_SOCKETS=y
-
-          # 4. 关键：启用独立 vmlinux-btf 包（将 BTF 元数据放于 rootfs/overlay，不占 6MB 内核槽位）
-          CONFIG_PACKAGE_vmlinux-btf=y
-
-          # 5. 必备运维工具链与管理服务
+          # 必备运维工具链与管理服务
+          CONFIG_PACKAGE_ip-full=y
           CONFIG_PACKAGE_curl=y
+          CONFIG_PACKAGE_ca-bundle=y
           CONFIG_PACKAGE_openssh-sftp-server=y
           CONFIG_PACKAGE_zerotier=y
           CONFIG_PACKAGE_luci-app-zerotier=y
           EOF
 
-          # 2. 修改默认后台 IP 为 192.168.88.1，避开光猫 192.168.1.1
+          # 3. 修改默认后台 IP 为 192.168.88.1，避开光猫 192.168.1.1
           sed -i 's/192.168.1.1/192.168.88.1/g' package/base-files/files/bin/config_generate
 
-          # 3. 固化出厂默认持久化 Overlay 配置（开机瞬间自动将 55.6GB 分区挂为根目录）
+          # 4. 固化出厂默认持久化 Overlay 配置（开机瞬间自动将 55.6GB 分区挂为根目录）
           mkdir -p files/etc/config
           cat << 'EOF' > files/etc/config/fstab
           config global
@@ -105,10 +120,10 @@ jobs:
           	option enabled '1'
           EOF
 
-          # 4. 补全默认依赖并核验关键配置
+          # 5. 补全默认依赖并核验关键配置
           make defconfig
           echo "=== 关键组件配置核验 ==="
-          grep -E "CONFIG_PACKAGE_vmlinux-btf|CONFIG_PACKAGE_kmod-veth|CONFIG_PACKAGE_curl" .config || true
+          grep -E "CONFIG_PACKAGE_vmlinux-btf|CONFIG_PACKAGE_kmod-veth|CONFIG_PACKAGE_kmod-sched-bpf|CONFIG_KERNEL_KALLSYMS" .config || true
 
       - name: Download packages
         run: |
@@ -118,9 +133,12 @@ jobs:
       - name: Compile firmware
         run: |
           make -j$(nproc) || make -j1 V=s
+          ls -lh build_dir/target-*/linux-qualcommax_ipq60xx/jdcloud_re-ss-01-uImage.itb || true
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
           name: immortalwrt-jdcloud-arthur
-          path: bin/targets/qualcommax/ipq60xx/*.bin
+          path: |
+            bin/targets/qualcommax/ipq60xx/*.bin
+            build_dir/target-*/linux-qualcommax_ipq60xx/vmlinux-btf*/vmlinux-btf
